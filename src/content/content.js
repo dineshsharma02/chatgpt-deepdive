@@ -5,11 +5,13 @@
   const MAX_SELECTED_TEXT = 500;
   const VIEW_PAD = 8;
   const FLOAT_GAP = 6;
-  const INJECT_POLL_MS = 80;
+  const INJECT_POLL_MS = 50;
   const COMPOSER_WAIT_MS = 12000;
-  const POST_FILL_DELAY_MS = 100;
+  const PERSIST_CHECK_MS = 120;
+  const PERSIST_STABLE_CHECKS = 2;
+  const POST_FILL_DELAY_MS = 80;
   const SUBMIT_POLL_MS = 40;
-  const SUBMIT_STEP_MS = 120;
+  const SUBMIT_CONFIRM_MS = 2000;
 
   const ALLOWED_HOSTS = new Set(["chatgpt.com", "chat.openai.com"]);
 
@@ -450,15 +452,25 @@
     return getComposerText(el).length > 0;
   }
 
-  function isComposerEmpty(composer) {
-    return getComposerText(composer).length === 0;
+  function hasUserMessageInThread() {
+    return Boolean(document.querySelector("[data-message-author-role='user']"));
+  }
+
+  function isResponseStreaming() {
+    return Boolean(
+      document.querySelector('button[data-testid="stop-button"]') ||
+        document.querySelector('button[aria-label*="Stop"]') ||
+        document.querySelector('[data-testid="stop-streaming-button"]')
+    );
   }
 
   function wasMessageSubmitted(composer, pathBefore) {
-    if (document.querySelector("[data-message-author-role='user']")) return true;
-    if (isComposerEmpty(composer)) return true;
+    if (hasUserMessageInThread()) return true;
+    if (isResponseStreaming()) return true;
     const pathNow = location.pathname;
     if (pathBefore !== pathNow && /^\/c\//.test(pathNow)) return true;
+    // Do NOT treat an empty composer as success — ChatGPT SPA rehydration clears it mid-load.
+    void composer;
     return false;
   }
 
@@ -600,28 +612,28 @@
 
     if (sendBtn) {
       realClickButton(sendBtn);
-      if (await waitForSubmitted(composer, pathBefore, 500)) return true;
+      if (await waitForSubmitted(composer, pathBefore, SUBMIT_CONFIRM_MS)) return true;
     }
 
     dispatchEnter(composer);
-    if (await waitForSubmitted(composer, pathBefore, SUBMIT_STEP_MS)) return true;
+    if (await waitForSubmitted(composer, pathBefore, SUBMIT_CONFIRM_MS)) return true;
 
     dispatchInsertParagraph(composer);
-    if (await waitForSubmitted(composer, pathBefore, SUBMIT_STEP_MS)) return true;
+    if (await waitForSubmitted(composer, pathBefore, SUBMIT_CONFIRM_MS)) return true;
 
     dispatchSubmitShortcut(composer);
-    if (await waitForSubmitted(composer, pathBefore, SUBMIT_STEP_MS)) return true;
+    if (await waitForSubmitted(composer, pathBefore, SUBMIT_CONFIRM_MS)) return true;
 
     sendBtn = findSendButton(false);
     if (sendBtn) {
       realClickButton(sendBtn);
-      if (await waitForSubmitted(composer, pathBefore, 500)) return true;
+      if (await waitForSubmitted(composer, pathBefore, SUBMIT_CONFIRM_MS)) return true;
     }
 
     const form = composer.closest("form");
     if (form?.requestSubmit) {
       form.requestSubmit();
-      if (await waitForSubmitted(composer, pathBefore, 500)) return true;
+      if (await waitForSubmitted(composer, pathBefore, SUBMIT_CONFIRM_MS)) return true;
     }
 
     return false;
@@ -631,14 +643,48 @@
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  async function waitForComposer() {
+  async function waitForComposerFast() {
     const start = Date.now();
     while (Date.now() - start < COMPOSER_WAIT_MS) {
       const composer = findComposer();
-      if (composer && isVisible(composer)) return composer;
+      if (composer && isVisible(composer) && findSendButton(false)) return composer;
       await sleep(INJECT_POLL_MS);
     }
-    return null;
+    return findComposer();
+  }
+
+  function fillComposer(composer, prompt) {
+    setComposerText(composer, prompt);
+    syncProseMirrorState(composer, prompt);
+  }
+
+  /** Fill quickly; re-fill only if ChatGPT SPA clears the composer. */
+  async function ensurePromptPersists(prompt, maxMs = 3000) {
+    const start = Date.now();
+    let stableChecks = 0;
+
+    while (Date.now() - start < maxMs) {
+      const composer = findComposer();
+      if (!composer) {
+        stableChecks = 0;
+        await sleep(INJECT_POLL_MS);
+        continue;
+      }
+
+      if (promptStillPresent(composer, prompt)) {
+        stableChecks += 1;
+        if (stableChecks >= PERSIST_STABLE_CHECKS) return composer;
+        await sleep(PERSIST_CHECK_MS);
+        continue;
+      }
+
+      stableChecks = 0;
+      fillComposer(composer, prompt);
+      await sleep(PERSIST_CHECK_MS);
+    }
+
+    const composer = findComposer();
+    return composer && promptStillPresent(composer, prompt) ? composer : null;
   }
 
   function cleanDeepdiveUrl() {
@@ -664,20 +710,36 @@
     chrome.runtime.sendMessage({ type: "deepdive.delete", id });
   }
 
+  function promptStillPresent(composer, prompt) {
+    const text = getComposerText(composer);
+    if (!text) return false;
+    const snippet = prompt.trim().slice(0, Math.min(24, prompt.trim().length));
+    return snippet.length === 0 || text.includes(snippet);
+  }
+
   async function injectAndSend(prompt, id) {
-    const composer = await waitForComposer();
+    const composer = await waitForComposerFast();
     if (!composer) return false;
 
-    let filled = false;
-    for (let attempt = 0; attempt < 4 && !filled; attempt++) {
-      filled = setComposerText(composer, prompt);
-      if (!filled) await sleep(INJECT_POLL_MS);
-    }
+    fillComposer(composer, prompt);
 
-    if (!filled) return false;
+    let activeComposer = await ensurePromptPersists(prompt);
+    if (!activeComposer) return false;
 
-    for (let round = 0; round < 3; round++) {
-      const submitted = await performSubmitWithFallback(composer, prompt, {
+    for (let round = 0; round < 4; round++) {
+      activeComposer = findComposer() || activeComposer;
+      if (!activeComposer) {
+        await sleep(INJECT_POLL_MS);
+        continue;
+      }
+
+      if (!promptStillPresent(activeComposer, prompt)) {
+        fillComposer(activeComposer, prompt);
+        activeComposer = (await ensurePromptPersists(prompt, 1500)) || activeComposer;
+        if (!promptStillPresent(activeComposer, prompt)) continue;
+      }
+
+      const submitted = await performSubmitWithFallback(activeComposer, prompt, {
         syncFirst: round === 0,
       });
       if (submitted) {
@@ -685,7 +747,8 @@
         deleteSessionPrompt(id);
         return true;
       }
-      await sleep(150);
+
+      await sleep(120);
     }
 
     return false;

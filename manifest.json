@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT Deep Dive",
-  "version": "1.0.4",
+  "version": "1.0.6",
   "description": "Branch off from ChatGPT: select text, refine a prompt, open a new chat without interrupting your current flow.",
   "permissions": ["storage", "tabs", "clipboardWrite"],
   "host_permissions": [
