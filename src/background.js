@@ -2,6 +2,10 @@ const SESSION_PREFIX = "deepdive:";
 const TAB_PREFIX = "deepdive-tab:";
 const SESSION_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_PROMPT_TEMPLATE =
+  'I\'m learning something and came across "{term}".\n' +
+  "Could you explain it in a bit more detail so I can learn it better?";
+
+const LEGACY_PROMPT_TEMPLATE =
   'I\'m learning software engineering and came across the term "{term}".\n' +
   "Explain what it means in plain language with a brief example.\n" +
   "Keep it concise so I can return to my main topic quickly.";
@@ -15,7 +19,11 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.storage.sync.get(["enabled", "promptTemplate"], (stored) => {
     const updates = {};
     if (stored.enabled === undefined) updates.enabled = DEFAULT_SETTINGS.enabled;
-    if (!stored.promptTemplate) updates.promptTemplate = DEFAULT_SETTINGS.promptTemplate;
+    if (!stored.promptTemplate) {
+      updates.promptTemplate = DEFAULT_PROMPT_TEMPLATE;
+    } else if (stored.promptTemplate === LEGACY_PROMPT_TEMPLATE) {
+      updates.promptTemplate = DEFAULT_PROMPT_TEMPLATE;
+    }
     if (Object.keys(updates).length) {
       chrome.storage.sync.set(updates);
     }

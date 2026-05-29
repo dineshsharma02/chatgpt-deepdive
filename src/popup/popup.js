@@ -1,7 +1,6 @@
 const DEFAULT_PROMPT_TEMPLATE =
-  'I\'m learning software engineering and came across the term "{term}".\n' +
-  "Explain what it means in plain language with a brief example.\n" +
-  "Keep it concise so I can return to my main topic quickly.";
+  'I\'m learning something and came across "{term}".\n' +
+  "Could you explain it in a bit more detail so I can learn it better?";
 
 const enabledEl = document.getElementById("enabled");
 const templateEl = document.getElementById("template");

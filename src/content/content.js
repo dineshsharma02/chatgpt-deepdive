@@ -40,9 +40,8 @@
 
   function defaultTemplate() {
     return (
-      'I\'m learning software engineering and came across the term "{term}".\n' +
-      "Explain what it means in plain language with a brief example.\n" +
-      "Keep it concise so I can return to my main topic quickly."
+      'I\'m learning something and came across "{term}".\n' +
+      "Could you explain it in a bit more detail so I can learn it better?"
     );
   }
 
@@ -259,8 +258,10 @@
   ];
 
   const SEND_SELECTORS = [
+    'button#composer-submit-button[data-testid="send-button"]',
     'button[data-testid="send-button"]',
     'button[data-testid="composer-send-button"]',
+    'button#send-button',
     'button[aria-label="Send prompt"]',
     'button[aria-label="Send message"]',
     'button[aria-label*="Send"]',
@@ -308,7 +309,7 @@
   function findSendButton(requireEnabled) {
     for (const selector of SEND_SELECTORS) {
       const btn = document.querySelector(selector);
-      if (!btn) continue;
+      if (!btn || !isVisible(btn)) continue;
       if (!requireEnabled || isButtonEnabled(btn)) return btn;
     }
 
@@ -316,10 +317,18 @@
     if (composer) {
       const form = composer.closest("form");
       if (form) {
+        for (const selector of SEND_SELECTORS) {
+          const btn = form.querySelector(selector);
+          if (btn && isVisible(btn) && (!requireEnabled || isButtonEnabled(btn))) return btn;
+        }
         const submit = form.querySelector('button[type="submit"]');
-        if (submit && (!requireEnabled || isButtonEnabled(submit))) return submit;
+        if (submit && isVisible(submit) && (!requireEnabled || isButtonEnabled(submit))) {
+          return submit;
+        }
         for (const btn of form.querySelectorAll("button")) {
-          if (!requireEnabled || isButtonEnabled(btn)) return btn;
+          if (!isVisible(btn)) continue;
+          const label = (btn.getAttribute("aria-label") || "").toLowerCase();
+          if (label.includes("send") && (!requireEnabled || isButtonEnabled(btn))) return btn;
         }
       }
     }
@@ -366,24 +375,6 @@
     if (!el.isContentEditable) return false;
 
     try {
-      const dt = new DataTransfer();
-      dt.setData("text/plain", text);
-      const pasted = el.dispatchEvent(
-        new ClipboardEvent("paste", {
-          bubbles: true,
-          cancelable: true,
-          clipboardData: dt,
-        })
-      );
-      if (pasted && getComposerText(el).length > 0) {
-        el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertFromPaste", data: text }));
-        return true;
-      }
-    } catch {
-      /* fall through to execCommand */
-    }
-
-    try {
       document.execCommand("selectAll", false, null);
       document.execCommand("delete", false, null);
     } catch {
@@ -400,19 +391,18 @@
           new InputEvent("beforeinput", {
             bubbles: true,
             cancelable: true,
+            composed: true,
             inputType: "insertText",
             data: line,
           })
         );
         if (document.execCommand("insertText", false, line)) {
           inserted = true;
-        } else {
-          el.textContent = (el.textContent || "") + line;
-          inserted = true;
         }
         el.dispatchEvent(
           new InputEvent("input", {
             bubbles: true,
+            composed: true,
             inputType: "insertText",
             data: line,
           })
@@ -421,15 +411,36 @@
       if (i < lines.length - 1) {
         document.execCommand("insertParagraph", false, null);
         el.dispatchEvent(
-          new InputEvent("input", { bubbles: true, inputType: "insertParagraph" })
+          new InputEvent("input", { bubbles: true, composed: true, inputType: "insertParagraph" })
         );
       }
     }
 
-    if (!inserted && !getComposerText(el)) {
+    if (!inserted || !getComposerText(el)) {
+      try {
+        const dt = new DataTransfer();
+        dt.setData("text/plain", text);
+        el.dispatchEvent(
+          new ClipboardEvent("paste", {
+            bubbles: true,
+            cancelable: true,
+            clipboardData: dt,
+          })
+        );
+      } catch {
+        /* ignore */
+      }
+    }
+
+    if (!getComposerText(el)) {
       el.textContent = text;
       el.dispatchEvent(
-        new InputEvent("input", { bubbles: true, inputType: "insertFromPaste", data: text })
+        new InputEvent("input", {
+          bubbles: true,
+          composed: true,
+          inputType: "insertFromPaste",
+          data: text,
+        })
       );
     }
 
@@ -437,8 +448,84 @@
     return getComposerText(el).length > 0;
   }
 
+  function isComposerEmpty(composer) {
+    return getComposerText(composer).length === 0;
+  }
+
+  function wasMessageSubmitted(composer, pathBefore) {
+    if (document.querySelector("[data-message-author-role='user']")) return true;
+    if (isComposerEmpty(composer)) return true;
+    const pathNow = location.pathname;
+    if (pathBefore !== pathNow && /^\/c\//.test(pathNow)) return true;
+    return false;
+  }
+
+  /** Nudge ProseMirror so Send handlers see non-empty editor state. */
+  function syncProseMirrorState(composer, text) {
+    focusComposer(composer);
+    try {
+      document.execCommand("selectAll", false, null);
+      document.execCommand("insertText", false, text);
+      composer.dispatchEvent(
+        new InputEvent("input", {
+          bubbles: true,
+          composed: true,
+          inputType: "insertText",
+          data: text,
+        })
+      );
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function realClickButton(btn) {
+    if (!btn) return false;
+    try {
+      const form = btn.closest("form");
+      if (form) {
+        if (typeof form.requestSubmit === "function") {
+          form.requestSubmit(btn);
+          return true;
+        }
+        form.submit();
+        return true;
+      }
+    } catch {
+      /* fall through */
+    }
+
+    try {
+      btn.focus();
+      const rect = btn.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const pointerInit = { bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy, view: window };
+      const mouseInit = { bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy, view: window };
+      btn.dispatchEvent(new PointerEvent("pointerover", pointerInit));
+      btn.dispatchEvent(new PointerEvent("pointerenter", pointerInit));
+      btn.dispatchEvent(new MouseEvent("mouseover", mouseInit));
+      btn.dispatchEvent(new MouseEvent("mouseenter", mouseInit));
+      btn.dispatchEvent(new PointerEvent("pointerdown", pointerInit));
+      btn.dispatchEvent(new MouseEvent("mousedown", mouseInit));
+      btn.dispatchEvent(new PointerEvent("pointerup", pointerInit));
+      btn.dispatchEvent(new MouseEvent("mouseup", mouseInit));
+      btn.dispatchEvent(new MouseEvent("click", mouseInit));
+      btn.click();
+      return true;
+    } catch {
+      try {
+        btn.click();
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  }
+
   function dispatchEnter(composer) {
-    const opts = {
+    focusComposer(composer);
+    const base = {
       key: "Enter",
       code: "Enter",
       keyCode: 13,
@@ -448,27 +535,87 @@
       composed: true,
     };
     for (const type of ["keydown", "keypress", "keyup"]) {
-      composer.dispatchEvent(new KeyboardEvent(type, opts));
+      composer.dispatchEvent(new KeyboardEvent(type, base));
+      document.dispatchEvent(new KeyboardEvent(type, base));
     }
   }
 
-  function trySubmit(composer) {
-    const sendBtn = findSendButton(true);
+  function dispatchInsertParagraph(composer) {
+    focusComposer(composer);
+    composer.dispatchEvent(
+      new InputEvent("beforeinput", {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        inputType: "insertParagraph",
+      })
+    );
+    composer.dispatchEvent(
+      new InputEvent("input", {
+        bubbles: true,
+        composed: true,
+        inputType: "insertParagraph",
+      })
+    );
+  }
+
+  function dispatchSubmitShortcut(composer) {
+    focusComposer(composer);
+    const isMac = navigator.platform.toUpperCase().includes("MAC");
+    const base = {
+      key: "Enter",
+      code: "Enter",
+      keyCode: 13,
+      which: 13,
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      ctrlKey: !isMac,
+      metaKey: isMac,
+    };
+    for (const type of ["keydown", "keypress", "keyup"]) {
+      composer.dispatchEvent(new KeyboardEvent(type, base));
+    }
+  }
+
+  async function performSubmitWithFallback(composer, prompt) {
+    syncProseMirrorState(composer, prompt);
+    await sleep(200);
+
+    const pathBefore = location.pathname;
+    let sendBtn = findSendButton(true);
+    if (!sendBtn) sendBtn = findSendButton(false);
+
     if (sendBtn) {
-      sendBtn.click();
-      return true;
+      realClickButton(sendBtn);
+      await sleep(350);
+      if (wasMessageSubmitted(composer, pathBefore)) return true;
     }
 
     dispatchEnter(composer);
+    await sleep(200);
+    if (wasMessageSubmitted(composer, pathBefore)) return true;
+
+    dispatchInsertParagraph(composer);
+    await sleep(200);
+    if (wasMessageSubmitted(composer, pathBefore)) return true;
+
+    dispatchSubmitShortcut(composer);
+    await sleep(200);
+    if (wasMessageSubmitted(composer, pathBefore)) return true;
+
+    sendBtn = findSendButton(false);
+    if (sendBtn) {
+      realClickButton(sendBtn);
+      await sleep(350);
+      if (wasMessageSubmitted(composer, pathBefore)) return true;
+    }
 
     const form = composer.closest("form");
-    if (form) {
-      form.requestSubmit?.();
-      const submit = form.querySelector('button[type="submit"]');
-      if (submit && isButtonEnabled(submit)) {
-        submit.click();
-        return true;
-      }
+    if (form?.requestSubmit) {
+      form.requestSubmit();
+      await sleep(350);
+      if (wasMessageSubmitted(composer, pathBefore)) return true;
     }
 
     return false;
@@ -532,31 +679,19 @@
 
     if (!filled) return false;
 
+    syncProseMirrorState(composer, prompt);
     await sleep(POST_FILL_DELAY_MS);
     await waitForSendReady(composer);
-    await sleep(150);
 
-    for (let i = 0; i < 5; i++) {
-      trySubmit(composer);
-      await sleep(400);
-      if (document.querySelector("[data-message-author-role='user']")) {
+    for (let round = 0; round < 6; round++) {
+      const submitted = await performSubmitWithFallback(composer, prompt);
+      if (submitted) {
         cleanDeepdiveUrl();
         deleteSessionPrompt(id);
         return true;
       }
-      const sendBtn = findSendButton(true);
-      if (sendBtn) sendBtn.click();
-      await sleep(300);
-    }
-
-    if (getComposerText(composer).length > 0) {
-      trySubmit(composer);
-      await sleep(600);
-      if (document.querySelector("[data-message-author-role='user']")) {
-        cleanDeepdiveUrl();
-        deleteSessionPrompt(id);
-        return true;
-      }
+      syncProseMirrorState(composer, prompt);
+      await sleep(500);
     }
 
     return false;
