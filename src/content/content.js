@@ -5,9 +5,11 @@
   const MAX_SELECTED_TEXT = 500;
   const VIEW_PAD = 8;
   const FLOAT_GAP = 6;
-  const INJECT_RETRY_MS = 250;
-  const INJECT_MAX_MS = 25000;
-  const POST_FILL_DELAY_MS = 400;
+  const INJECT_POLL_MS = 80;
+  const COMPOSER_WAIT_MS = 12000;
+  const POST_FILL_DELAY_MS = 100;
+  const SUBMIT_POLL_MS = 40;
+  const SUBMIT_STEP_MS = 120;
 
   const ALLOWED_HOSTS = new Set(["chatgpt.com", "chat.openai.com"]);
 
@@ -578,44 +580,48 @@
     }
   }
 
-  async function performSubmitWithFallback(composer, prompt) {
-    syncProseMirrorState(composer, prompt);
-    await sleep(200);
+  async function waitForSubmitted(composer, pathBefore, maxMs) {
+    const start = Date.now();
+    while (Date.now() - start < maxMs) {
+      if (wasMessageSubmitted(composer, pathBefore)) return true;
+      await sleep(SUBMIT_POLL_MS);
+    }
+    return wasMessageSubmitted(composer, pathBefore);
+  }
+
+  async function performSubmitWithFallback(composer, prompt, { syncFirst = true } = {}) {
+    if (syncFirst) {
+      syncProseMirrorState(composer, prompt);
+      await sleep(POST_FILL_DELAY_MS);
+    }
 
     const pathBefore = location.pathname;
-    let sendBtn = findSendButton(true);
-    if (!sendBtn) sendBtn = findSendButton(false);
+    let sendBtn = findSendButton(true) || findSendButton(false);
 
     if (sendBtn) {
       realClickButton(sendBtn);
-      await sleep(350);
-      if (wasMessageSubmitted(composer, pathBefore)) return true;
+      if (await waitForSubmitted(composer, pathBefore, 500)) return true;
     }
 
     dispatchEnter(composer);
-    await sleep(200);
-    if (wasMessageSubmitted(composer, pathBefore)) return true;
+    if (await waitForSubmitted(composer, pathBefore, SUBMIT_STEP_MS)) return true;
 
     dispatchInsertParagraph(composer);
-    await sleep(200);
-    if (wasMessageSubmitted(composer, pathBefore)) return true;
+    if (await waitForSubmitted(composer, pathBefore, SUBMIT_STEP_MS)) return true;
 
     dispatchSubmitShortcut(composer);
-    await sleep(200);
-    if (wasMessageSubmitted(composer, pathBefore)) return true;
+    if (await waitForSubmitted(composer, pathBefore, SUBMIT_STEP_MS)) return true;
 
     sendBtn = findSendButton(false);
     if (sendBtn) {
       realClickButton(sendBtn);
-      await sleep(350);
-      if (wasMessageSubmitted(composer, pathBefore)) return true;
+      if (await waitForSubmitted(composer, pathBefore, 500)) return true;
     }
 
     const form = composer.closest("form");
     if (form?.requestSubmit) {
       form.requestSubmit();
-      await sleep(350);
-      if (wasMessageSubmitted(composer, pathBefore)) return true;
+      if (await waitForSubmitted(composer, pathBefore, 500)) return true;
     }
 
     return false;
@@ -627,21 +633,12 @@
 
   async function waitForComposer() {
     const start = Date.now();
-    while (Date.now() - start < INJECT_MAX_MS) {
+    while (Date.now() - start < COMPOSER_WAIT_MS) {
       const composer = findComposer();
       if (composer && isVisible(composer)) return composer;
-      await sleep(INJECT_RETRY_MS);
+      await sleep(INJECT_POLL_MS);
     }
     return null;
-  }
-
-  async function waitForSendReady(composer) {
-    const start = Date.now();
-    while (Date.now() - start < INJECT_MAX_MS) {
-      if (getComposerText(composer).length > 0 && findSendButton(true)) return true;
-      await sleep(INJECT_RETRY_MS);
-    }
-    return getComposerText(composer).length > 0;
   }
 
   function cleanDeepdiveUrl() {
@@ -672,26 +669,23 @@
     if (!composer) return false;
 
     let filled = false;
-    for (let attempt = 0; attempt < 8 && !filled; attempt++) {
+    for (let attempt = 0; attempt < 4 && !filled; attempt++) {
       filled = setComposerText(composer, prompt);
-      if (!filled) await sleep(INJECT_RETRY_MS);
+      if (!filled) await sleep(INJECT_POLL_MS);
     }
 
     if (!filled) return false;
 
-    syncProseMirrorState(composer, prompt);
-    await sleep(POST_FILL_DELAY_MS);
-    await waitForSendReady(composer);
-
-    for (let round = 0; round < 6; round++) {
-      const submitted = await performSubmitWithFallback(composer, prompt);
+    for (let round = 0; round < 3; round++) {
+      const submitted = await performSubmitWithFallback(composer, prompt, {
+        syncFirst: round === 0,
+      });
       if (submitted) {
         cleanDeepdiveUrl();
         deleteSessionPrompt(id);
         return true;
       }
-      syncProseMirrorState(composer, prompt);
-      await sleep(500);
+      await sleep(150);
     }
 
     return false;
